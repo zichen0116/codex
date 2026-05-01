@@ -380,6 +380,19 @@ mod thread_processor_behavior_tests {
     }
 
     #[test]
+    fn project_roots_become_additional_writable_roots_without_cwd() {
+        let cwd = test_path_buf("/tmp/project").abs();
+        let extra = test_path_buf("/tmp/extra").abs();
+
+        let roots = additional_writable_roots_from_project_roots(
+            Some(vec![cwd.clone(), extra.clone(), extra.clone()]),
+            Some(cwd.as_path()),
+        );
+
+        assert_eq!(roots, vec![extra.to_path_buf()]);
+    }
+
+    #[test]
     fn config_load_error_marks_cloud_requirements_failures_for_relogin() {
         let err = std::io::Error::other(CloudRequirementsLoadError::new(
             CloudRequirementsLoadErrorCode::Auth,
@@ -514,6 +527,7 @@ mod thread_processor_behavior_tests {
             model_provider: None,
             service_tier: Some(Some(codex_protocol::config_types::ServiceTier::Fast)),
             cwd: None,
+            project_roots: None,
             approval_policy: None,
             approvals_reviewer: None,
             sandbox: None,

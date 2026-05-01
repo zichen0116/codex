@@ -355,7 +355,7 @@ async fn thread_start_params_include_review_policy_when_review_policy_is_manual_
         .await
         .expect("build config with manual-only review policy");
 
-    let params = thread_start_params_from_config(&config);
+    let params = thread_start_params_from_config(&config, /*project_roots*/ None);
 
     assert_eq!(
         params.approvals_reviewer,
@@ -383,7 +383,7 @@ async fn thread_start_params_include_review_policy_when_auto_review_is_enabled()
         .await
         .expect("build config with guardian review policy");
 
-    let params = thread_start_params_from_config(&config);
+    let params = thread_start_params_from_config(&config, /*project_roots*/ None);
 
     assert_eq!(
         params.approvals_reviewer,
@@ -392,7 +392,7 @@ async fn thread_start_params_include_review_policy_when_auto_review_is_enabled()
 }
 
 #[tokio::test]
-async fn thread_lifecycle_params_include_legacy_sandbox_when_no_active_profile() {
+async fn thread_lifecycle_params_use_builtin_permission_selection_when_no_active_profile() {
     let codex_home = tempdir().expect("create temp codex home");
     let cwd = tempdir().expect("create temp cwd");
     let config = ConfigBuilder::default()
@@ -406,20 +406,100 @@ async fn thread_lifecycle_params_include_legacy_sandbox_when_no_active_profile()
         .await
         .expect("build config with legacy sandbox override");
 
-    let start_params = thread_start_params_from_config(&config);
-    let resume_params = thread_resume_params_from_config(&config, "thread-id".to_string());
+    let start_params = thread_start_params_from_config(&config, /*project_roots*/ None);
+    let resume_params = thread_resume_params_from_config(
+        &config,
+        "thread-id".to_string(),
+        /*project_roots*/ None,
+    );
 
     assert_eq!(config.permissions.active_permission_profile(), None);
+    assert_eq!(start_params.sandbox, None);
+    assert_eq!(start_params.project_roots, None);
     assert_eq!(
-        start_params.sandbox,
-        Some(codex_app_server_protocol::SandboxMode::DangerFullAccess)
+        start_params.permissions,
+        Some(
+            codex_app_server_protocol::PermissionProfileSelectionParams::Profile {
+                id: ":danger-no-sandbox".to_string(),
+                modifications: None,
+            }
+        )
     );
-    assert_eq!(start_params.permissions, None);
+    assert_eq!(resume_params.sandbox, None);
+    assert_eq!(resume_params.project_roots, None);
     assert_eq!(
-        resume_params.sandbox,
-        Some(codex_app_server_protocol::SandboxMode::DangerFullAccess)
+        resume_params.permissions,
+        Some(
+            codex_app_server_protocol::PermissionProfileSelectionParams::Profile {
+                id: ":danger-no-sandbox".to_string(),
+                modifications: None,
+            }
+        )
     );
-    assert_eq!(resume_params.permissions, None);
+}
+
+#[tokio::test]
+async fn thread_lifecycle_params_preserve_add_dir_roots_as_project_roots() {
+    let codex_home = tempdir().expect("create temp codex home");
+    let workspace = tempdir().expect("create temp workspace");
+    let frontend = workspace.path().join("frontend");
+    let backend = workspace.path().join("backend");
+    std::fs::create_dir_all(&frontend).expect("create frontend dir");
+    std::fs::create_dir_all(&backend).expect("create backend dir");
+
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(frontend.clone()),
+            sandbox_mode: Some(SandboxMode::WorkspaceWrite),
+            additional_writable_roots: vec![backend.clone()],
+            ..Default::default()
+        })
+        .build()
+        .await
+        .expect("build config with workspace-write root");
+
+    let project_roots = project_roots_from_add_dir(config.cwd.as_path(), vec![backend.clone()]);
+    let start_params = thread_start_params_from_config(&config, project_roots.clone());
+    let resume_params =
+        thread_resume_params_from_config(&config, "thread-id".to_string(), project_roots);
+    let frontend = frontend.abs();
+    let backend = backend.abs();
+
+    for project_roots in [
+        start_params
+            .project_roots
+            .clone()
+            .expect("start project roots"),
+        resume_params
+            .project_roots
+            .clone()
+            .expect("resume project roots"),
+    ] {
+        assert_eq!(project_roots.len(), 2);
+        assert!(project_roots.contains(&frontend));
+        assert!(project_roots.contains(&backend));
+    }
+    assert_eq!(start_params.sandbox, None);
+    assert_eq!(
+        start_params.permissions,
+        Some(
+            codex_app_server_protocol::PermissionProfileSelectionParams::Profile {
+                id: ":workspace".to_string(),
+                modifications: None,
+            }
+        )
+    );
+    assert_eq!(resume_params.sandbox, None);
+    assert_eq!(
+        resume_params.permissions,
+        Some(
+            codex_app_server_protocol::PermissionProfileSelectionParams::Profile {
+                id: ":workspace".to_string(),
+                modifications: None,
+            }
+        )
+    );
 }
 
 #[tokio::test]

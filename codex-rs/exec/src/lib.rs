@@ -25,7 +25,6 @@ use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::McpServerElicitationAction;
 use codex_app_server_protocol::McpServerElicitationRequestResponse;
-use codex_app_server_protocol::PermissionProfileModificationParams;
 use codex_app_server_protocol::PermissionProfileSelectionParams;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewStartParams;
@@ -79,8 +78,6 @@ use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_otel::set_parent_from_context;
 use codex_otel::traceparent_context_from_env;
 use codex_protocol::config_types::SandboxMode;
-use codex_protocol::models::ActivePermissionProfile;
-use codex_protocol::models::ActivePermissionProfileModification;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewRequest;
@@ -207,6 +204,7 @@ struct ExecRunArgs {
     oss: bool,
     output_schema_path: Option<PathBuf>,
     prompt: Option<String>,
+    project_roots: Option<Vec<AbsolutePathBuf>>,
     skip_git_repo_check: bool,
     stderr_with_ansi: bool,
 }
@@ -257,6 +255,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         cwd,
         add_dir,
     } = shared;
+    let add_dir_for_project_roots = add_dir.clone();
 
     let (_stdout_with_ansi, stderr_with_ansi) = match color {
         cli::Color::Always => (true, true),
@@ -430,6 +429,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         .cloud_requirements(cloud_requirements)
         .build()
         .await?;
+    let project_roots = project_roots_from_add_dir(config.cwd.as_path(), add_dir_for_project_roots);
 
     #[allow(clippy::print_stderr)]
     match check_execpolicy_for_warnings(&config.config_layer_stack).await {
@@ -541,6 +541,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         oss,
         output_schema_path,
         prompt,
+        project_roots,
         skip_git_repo_check,
         stderr_with_ansi,
     })
@@ -563,6 +564,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         oss,
         output_schema_path,
         prompt,
+        project_roots,
         skip_git_repo_check,
         stderr_with_ansi,
     } = args;
@@ -685,7 +687,11 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 &client,
                 ClientRequest::ThreadResume {
                     request_id: request_ids.next(),
-                    params: thread_resume_params_from_config(&config, thread_id),
+                    params: thread_resume_params_from_config(
+                        &config,
+                        thread_id,
+                        project_roots.clone(),
+                    ),
                 },
                 "thread/resume",
             )
@@ -700,7 +706,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 &client,
                 ClientRequest::ThreadStart {
                     request_id: request_ids.next(),
-                    params: thread_start_params_from_config(&config),
+                    params: thread_start_params_from_config(&config, project_roots.clone()),
                 },
                 "thread/start",
             )
@@ -716,7 +722,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             &client,
             ClientRequest::ThreadStart {
                 request_id: request_ids.next(),
-                params: thread_start_params_from_config(&config),
+                params: thread_start_params_from_config(&config, project_roots.clone()),
             },
             "thread/start",
         )
@@ -929,21 +935,23 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
+fn thread_start_params_from_config(
+    config: &Config,
+    project_roots: Option<Vec<AbsolutePathBuf>>,
+) -> ThreadStartParams {
     let permissions = permissions_selection_from_config(config);
-    let sandbox = permissions.is_none().then(|| {
-        sandbox_mode_from_permission_profile(
-            &config.permissions.permission_profile(),
-            config.cwd.as_path(),
-        )
-    });
+    let sandbox = permissions
+        .is_none()
+        .then(|| legacy_sandbox_from_config(config))
+        .flatten();
     ThreadStartParams {
         model: config.model.clone(),
         model_provider: Some(config.model_provider_id.clone()),
         cwd: Some(config.cwd.to_string_lossy().to_string()),
+        project_roots,
         approval_policy: Some(config.permissions.approval_policy.value().into()),
         approvals_reviewer: approvals_reviewer_override_from_config(config),
-        sandbox: sandbox.flatten(),
+        sandbox,
         permissions,
         config: config_request_overrides_from_config(config),
         ephemeral: Some(config.ephemeral),
@@ -951,22 +959,25 @@ fn thread_start_params_from_config(config: &Config) -> ThreadStartParams {
     }
 }
 
-fn thread_resume_params_from_config(config: &Config, thread_id: String) -> ThreadResumeParams {
+fn thread_resume_params_from_config(
+    config: &Config,
+    thread_id: String,
+    project_roots: Option<Vec<AbsolutePathBuf>>,
+) -> ThreadResumeParams {
     let permissions = permissions_selection_from_config(config);
-    let sandbox = permissions.is_none().then(|| {
-        sandbox_mode_from_permission_profile(
-            &config.permissions.permission_profile(),
-            config.cwd.as_path(),
-        )
-    });
+    let sandbox = permissions
+        .is_none()
+        .then(|| legacy_sandbox_from_config(config))
+        .flatten();
     ThreadResumeParams {
         thread_id,
         model: config.model.clone(),
         model_provider: Some(config.model_provider_id.clone()),
         cwd: Some(config.cwd.to_string_lossy().to_string()),
+        project_roots,
         approval_policy: Some(config.permissions.approval_policy.value().into()),
         approvals_reviewer: approvals_reviewer_override_from_config(config),
-        sandbox: sandbox.flatten(),
+        sandbox,
         permissions,
         config: config_request_overrides_from_config(config),
         ..ThreadResumeParams::default()
@@ -974,28 +985,57 @@ fn thread_resume_params_from_config(config: &Config, thread_id: String) -> Threa
 }
 
 fn permissions_selection_from_config(config: &Config) -> Option<PermissionProfileSelectionParams> {
-    config
-        .permissions
-        .active_permission_profile()
-        .map(permissions_selection_from_active_profile)
+    if let Some(active) = config.permissions.active_permission_profile() {
+        Some(PermissionProfileSelectionParams::Profile {
+            id: active.id,
+            modifications: None,
+        })
+    } else {
+        builtin_permissions_selection_from_legacy_profile(config)
+    }
 }
 
-fn permissions_selection_from_active_profile(
-    active: ActivePermissionProfile,
-) -> PermissionProfileSelectionParams {
-    let modifications = active
-        .modifications
-        .into_iter()
-        .map(|modification| match modification {
-            ActivePermissionProfileModification::AdditionalWritableRoot { path } => {
-                PermissionProfileModificationParams::AdditionalWritableRoot { path }
-            }
-        })
-        .collect::<Vec<_>>();
-    PermissionProfileSelectionParams::Profile {
-        id: active.id,
-        modifications: (!modifications.is_empty()).then_some(modifications),
+fn builtin_permissions_selection_from_legacy_profile(
+    config: &Config,
+) -> Option<PermissionProfileSelectionParams> {
+    let id = match sandbox_mode_from_permission_profile(
+        &config.permissions.permission_profile(),
+        config.cwd.as_path(),
+    )? {
+        codex_app_server_protocol::SandboxMode::ReadOnly => ":read-only",
+        codex_app_server_protocol::SandboxMode::WorkspaceWrite => ":workspace",
+        codex_app_server_protocol::SandboxMode::DangerFullAccess => ":danger-no-sandbox",
+    };
+    Some(PermissionProfileSelectionParams::Profile {
+        id: id.to_string(),
+        modifications: None,
+    })
+}
+
+fn legacy_sandbox_from_config(config: &Config) -> Option<codex_app_server_protocol::SandboxMode> {
+    if config.permissions.active_permission_profile().is_some() {
+        return None;
     }
+    sandbox_mode_from_permission_profile(
+        &config.permissions.permission_profile(),
+        config.cwd.as_path(),
+    )
+}
+
+fn project_roots_from_add_dir(cwd: &Path, add_dir: Vec<PathBuf>) -> Option<Vec<AbsolutePathBuf>> {
+    if add_dir.is_empty() {
+        return None;
+    }
+    let cwd = AbsolutePathBuf::from_absolute_path(cwd).ok()?;
+    let mut roots = vec![cwd.clone()];
+    roots.extend(
+        add_dir
+            .into_iter()
+            .map(|path| AbsolutePathBuf::resolve_path_against_base(path, cwd.as_path())),
+    );
+    roots.sort();
+    roots.dedup();
+    (roots.len() > 1).then_some(roots)
 }
 
 fn sandbox_mode_from_permission_profile(

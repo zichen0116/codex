@@ -3778,6 +3778,12 @@ pub struct ThreadStartParams {
     pub service_tier: Option<Option<ServiceTier>>,
     #[ts(optional = nullable)]
     pub cwd: Option<String>,
+    /// Concrete project roots used when realizing workspace-scoped permission
+    /// profiles for this thread. `cwd` is already a project root; clients use
+    /// this when they need to carry additional roots such as `--add-dir`.
+    #[experimental("thread/start.projectRoots")]
+    #[ts(optional = nullable)]
+    pub project_roots: Option<Vec<AbsolutePathBuf>>,
     #[experimental(nested)]
     #[ts(optional = nullable)]
     pub approval_policy: Option<AskForApproval>,
@@ -3932,6 +3938,12 @@ pub struct ThreadResumeParams {
     pub service_tier: Option<Option<ServiceTier>>,
     #[ts(optional = nullable)]
     pub cwd: Option<String>,
+    /// Concrete project roots used when realizing workspace-scoped permission
+    /// profiles for the resumed thread. `cwd` is already a project root; clients
+    /// use this when they need to carry additional roots such as `--add-dir`.
+    #[experimental("thread/resume.projectRoots")]
+    #[ts(optional = nullable)]
+    pub project_roots: Option<Vec<AbsolutePathBuf>>,
     #[experimental(nested)]
     #[ts(optional = nullable)]
     pub approval_policy: Option<AskForApproval>,
