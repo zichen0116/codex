@@ -85,7 +85,7 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
 
     let mut expected = BTreeMap::new();
     for spec in [
-        create_exec_command_tool(CommandToolOptions {
+        create_exec_command_tool(ExecCommandToolOptions {
             allow_login_shell: true,
             exec_permission_approvals_enabled: false,
             include_environment_id: false,
@@ -161,7 +161,7 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
 }
 
 #[test]
-fn process_tool_specs_include_environment_id_only_for_multiple_selected_environments() {
+fn exec_command_spec_includes_environment_id_only_for_multiple_selected_environments() {
     let model_info = model_info();
     let available_models = Vec::new();
     let mut features = Features::with_defaults();
@@ -237,7 +237,7 @@ fn process_tool_specs_include_environment_id_only_for_multiple_selected_environm
     assert_process_tool_environment_id(
         &multi_environment_shell_tools,
         "shell_command",
-        /*expected_present*/ true,
+        /*expected_present*/ false,
     );
 }
 

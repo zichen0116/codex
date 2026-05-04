@@ -67,6 +67,7 @@ pub use json_schema::JsonSchemaPrimitiveType;
 pub use json_schema::JsonSchemaType;
 pub use json_schema::parse_tool_input_schema;
 pub use local_tool::CommandToolOptions;
+pub use local_tool::ExecCommandToolOptions;
 pub use local_tool::ShellToolOptions;
 pub use local_tool::create_exec_command_tool;
 pub use local_tool::create_request_permissions_tool;

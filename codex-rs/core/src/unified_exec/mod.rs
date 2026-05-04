@@ -27,6 +27,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Weak;
 
+use codex_exec_server::Environment;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -94,6 +95,7 @@ pub(crate) struct ExecCommandRequest {
     pub yield_time_ms: u64,
     pub max_output_tokens: Option<usize>,
     pub cwd: AbsolutePathBuf,
+    pub environment: Arc<Environment>,
     pub network: Option<NetworkProxy>,
     pub tty: bool,
     pub sandbox_permissions: SandboxPermissions,

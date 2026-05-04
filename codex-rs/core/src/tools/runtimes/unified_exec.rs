@@ -37,6 +37,7 @@ use crate::unified_exec::NoopSpawnLifecycle;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcess;
 use crate::unified_exec::UnifiedExecProcessManager;
+use codex_exec_server::Environment;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
@@ -48,6 +49,7 @@ use codex_tools::UnifiedExecShellMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Request payload used by the unified-exec runtime after approvals and
@@ -58,6 +60,7 @@ pub struct UnifiedExecRequest {
     pub hook_command: String,
     pub process_id: i32,
     pub cwd: AbsolutePathBuf,
+    pub environment: Arc<Environment>,
     pub env: HashMap<String, String>,
     pub exec_server_env_config: Option<ExecServerEnvConfig>,
     pub explicit_env_overrides: HashMap<String, String>,
@@ -214,6 +217,10 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
 }
 
 impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRuntime<'a> {
+    fn sandbox_cwd<'b>(&self, req: &'b UnifiedExecRequest) -> Option<&'b AbsolutePathBuf> {
+        Some(&req.cwd)
+    }
+
     fn network_approval_spec(
         &self,
         req: &UnifiedExecRequest,
@@ -252,11 +259,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
         if let Some(network) = managed_network {
             network.apply_to_env(&mut env);
         }
-        let environment_is_remote = ctx
-            .turn
-            .environments
-            .primary()
-            .is_some_and(|turn_environment| turn_environment.environment.is_remote());
+        let environment_is_remote = req.environment.is_remote();
         let command = if environment_is_remote {
             base_command.to_vec()
         } else {
@@ -293,14 +296,10 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
             .await?
             {
                 Some(prepared) => {
-                    let Some(turn_environment) = ctx.turn.environments.primary() else {
+                    if req.environment.is_remote() {
                         return Err(ToolError::Rejected(
-                            "exec_command is unavailable in this session".to_string(),
-                        ));
-                    };
-                    if turn_environment.environment.is_remote() {
-                        return Err(ToolError::Rejected(
-                            "unified_exec zsh-fork is not supported when exec_server_url is configured".to_string(),
+                            "unified_exec zsh-fork is not supported for remote environments"
+                                .to_string(),
                         ));
                     }
                     return self
@@ -310,7 +309,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                             &prepared.exec_request,
                             req.tty,
                             prepared.spawn_lifecycle,
-                            turn_environment.environment.as_ref(),
+                            req.environment.as_ref(),
                         )
                         .await
                         .map_err(|err| match err {
@@ -338,18 +337,13 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
             .env_for(command, options, managed_network)
             .map_err(|err| ToolError::Codex(err.into()))?;
         exec_env.exec_server_env_config = req.exec_server_env_config.clone();
-        let Some(turn_environment) = ctx.turn.environments.primary() else {
-            return Err(ToolError::Rejected(
-                "exec_command is unavailable in this session".to_string(),
-            ));
-        };
         self.manager
             .open_session_with_exec_env(
                 req.process_id,
                 &exec_env,
                 req.tty,
                 Box::new(NoopSpawnLifecycle),
-                turn_environment.environment.as_ref(),
+                req.environment.as_ref(),
             )
             .await
             .map_err(|err| match err {
@@ -368,7 +362,9 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
 mod tests {
     use super::*;
     use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
+    use core_test_support::PathExt;
     use std::time::Duration;
+    use tempfile::tempdir;
 
     #[test]
     fn unified_exec_options_combines_default_timeout_with_network_denial_cancellation() {
@@ -390,5 +386,36 @@ mod tests {
             }
             other => panic!("expected timeout-or-cancellation expiration, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sandbox_cwd_uses_request_cwd() -> anyhow::Result<()> {
+        let manager = UnifiedExecProcessManager::default();
+        let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
+        let cwd = tempdir()?.path().abs();
+        let req = UnifiedExecRequest {
+            command: vec!["true".to_string()],
+            hook_command: "true".to_string(),
+            process_id: 1,
+            cwd: cwd.clone(),
+            environment: Arc::new(Environment::default_for_tests()),
+            env: HashMap::new(),
+            exec_server_env_config: None,
+            explicit_env_overrides: HashMap::new(),
+            network: None,
+            tty: false,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            additional_permissions: None,
+            #[cfg(unix)]
+            additional_permissions_preapproved: false,
+            justification: None,
+            exec_approval_requirement: ExecApprovalRequirement::Skip {
+                bypass_sandbox: false,
+                proposed_execpolicy_amendment: None,
+            },
+        };
+
+        assert_eq!(runtime.sandbox_cwd(&req), Some(&cwd));
+        Ok(())
     }
 }

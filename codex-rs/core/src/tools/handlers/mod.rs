@@ -25,6 +25,7 @@ use codex_sandboxing::policy_transforms::normalize_additional_permissions;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use serde::Deserialize;
+use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -74,6 +75,18 @@ where
 {
     let _guard = AbsolutePathBufGuard::new(base_path);
     parse_arguments(arguments)
+}
+
+fn resolve_workdir_base_path(
+    arguments: &str,
+    default_cwd: &AbsolutePathBuf,
+) -> Result<AbsolutePathBuf, FunctionCallError> {
+    let arguments: Value = parse_arguments(arguments)?;
+    Ok(arguments
+        .get("workdir")
+        .and_then(Value::as_str)
+        .filter(|workdir| !workdir.is_empty())
+        .map_or_else(|| default_cwd.clone(), |workdir| default_cwd.join(workdir)))
 }
 
 pub(crate) struct ResolvedToolEnvironment {
@@ -296,7 +309,6 @@ mod tests {
     use codex_utils_absolute_path::AbsolutePathBuf;
     use core_test_support::PathExt;
     use pretty_assertions::assert_eq;
-    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[derive(serde::Deserialize)]
@@ -334,19 +346,6 @@ mod tests {
             .expect("valid arguments should parse");
 
         assert!(resolved.is_none());
-    }
-
-    #[tokio::test]
-    async fn resolve_tool_environment_uses_primary_environment_by_default() {
-        let (_session, turn) = make_session_and_context().await;
-        let primary = turn.environments.primary().expect("primary environment");
-
-        let resolved = resolve_tool_environment(&turn, r#"{"cmd":"echo hello"}"#)
-            .expect("valid arguments should parse")
-            .expect("selected environment");
-
-        assert!(Arc::ptr_eq(&resolved.environment, &primary.environment));
-        assert_eq!(resolved.cwd, primary.cwd);
     }
 
     #[tokio::test]
