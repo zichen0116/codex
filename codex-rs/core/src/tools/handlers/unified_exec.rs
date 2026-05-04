@@ -13,7 +13,6 @@ use crate::tools::handlers::implicit_granted_permissions;
 use crate::tools::handlers::normalize_and_validate_additional_permissions;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
-use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
@@ -65,6 +64,16 @@ pub(crate) struct ExecCommandArgs {
     justification: Option<String>,
     #[serde(default)]
     prefix_rule: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExecCommandEnvironmentArgs {
+    #[serde(default)]
+    environment_id: Option<String>,
+    // Keep this raw until after environment selection; relative paths must be
+    // resolved against the selected environment cwd, not the process cwd.
+    #[serde(default)]
+    workdir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,22 +210,46 @@ impl ToolHandler for UnifiedExecHandler {
 
         let response = match tool_name.name.as_str() {
             "exec_command" => {
-                let Some(target_environment) =
-                    resolve_tool_environment(context.turn.as_ref(), &arguments)?
+                let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
+                let Some(turn_environment) = environment_args
+                    .environment_id
+                    .as_deref()
+                    .map_or_else(
+                        || Ok(turn.environments.primary()),
+                        |environment_id| {
+                            turn.environments
+                                .turn_environments
+                                .iter()
+                                .find(|environment| environment.environment_id == environment_id)
+                                .map(Some)
+                                .ok_or_else(|| {
+                                    format!("unknown turn environment id `{environment_id}`")
+                                })
+                        },
+                    )
+                    .map_err(FunctionCallError::RespondToModel)?
                 else {
                     return Err(FunctionCallError::RespondToModel(
                         "unified exec is unavailable in this session".to_string(),
                     ));
                 };
-                let fs = target_environment.environment.get_filesystem();
-                let args: ExecCommandArgs =
-                    parse_arguments_with_base_path(&arguments, &target_environment.cwd)?;
+                let cwd = environment_args
+                    .workdir
+                    .as_deref()
+                    .filter(|workdir| !workdir.is_empty())
+                    .map_or_else(
+                        || turn_environment.cwd.clone(),
+                        |workdir| turn_environment.cwd.join(workdir),
+                    );
+                let environment = Arc::clone(&turn_environment.environment);
+                let fs = environment.get_filesystem();
+                let args: ExecCommandArgs = parse_arguments_with_base_path(&arguments, &cwd)?;
                 let hook_command = args.cmd.clone();
                 maybe_emit_implicit_skill_invocation(
                     session.as_ref(),
                     context.turn.as_ref(),
                     &hook_command,
-                    &target_environment.cwd,
+                    &cwd,
                 )
                 .await;
                 let process_id = manager.allocate_process_id().await;
@@ -247,7 +280,7 @@ impl ToolHandler for UnifiedExecHandler {
                 let requested_additional_permissions = additional_permissions.clone();
                 let effective_additional_permissions = apply_granted_turn_permissions(
                     context.session.as_ref(),
-                    target_environment.cwd.as_path(),
+                    cwd.as_path(),
                     sandbox_permissions,
                     additional_permissions,
                 )
@@ -287,7 +320,7 @@ impl ToolHandler for UnifiedExecHandler {
                             effective_additional_permissions.sandbox_permissions,
                             effective_additional_permissions.additional_permissions,
                             effective_additional_permissions.permissions_preapproved,
-                            &target_environment.cwd,
+                            &cwd,
                         )
                     },
                     |permissions| Ok(Some(permissions)),
@@ -301,7 +334,7 @@ impl ToolHandler for UnifiedExecHandler {
 
                 if let Some(output) = intercept_apply_patch(
                     &command,
-                    &target_environment.cwd,
+                    &cwd,
                     fs.as_ref(),
                     context.session.clone(),
                     context.turn.clone(),
@@ -334,7 +367,8 @@ impl ToolHandler for UnifiedExecHandler {
                             process_id,
                             yield_time_ms,
                             max_output_tokens: Some(max_output_tokens),
-                            cwd: target_environment.cwd,
+                            cwd,
+                            environment,
                             network: context.turn.network.clone(),
                             tty,
                             sandbox_permissions: effective_additional_permissions

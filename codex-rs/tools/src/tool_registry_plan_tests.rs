@@ -88,7 +88,6 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         create_exec_command_tool(CommandToolOptions {
             allow_login_shell: true,
             exec_permission_approvals_enabled: false,
-            include_environment_id: false,
         }),
         create_write_stdin_tool(),
         create_update_plan_tool(),
@@ -161,7 +160,7 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
 }
 
 #[test]
-fn process_tool_specs_include_environment_id_only_for_multiple_selected_environments() {
+fn exec_command_spec_includes_environment_id_only_for_multiple_selected_environments() {
     let model_info = model_info();
     let available_models = Vec::new();
     let mut features = Features::with_defaults();
@@ -199,44 +198,6 @@ fn process_tool_specs_include_environment_id_only_for_multiple_selected_environm
     assert_process_tool_environment_id(
         &multi_environment_tools,
         "exec_command",
-        /*expected_present*/ true,
-    );
-
-    let mut shell_command_features = Features::with_defaults();
-    shell_command_features.disable(Feature::UnifiedExec);
-    let shell_command_config = ToolsConfig::new(&ToolsConfigParams {
-        model_info: &model_info,
-        available_models: &available_models,
-        features: &shell_command_features,
-        image_generation_tool_auth_allowed: true,
-        web_search_mode: Some(WebSearchMode::Cached),
-        session_source: SessionSource::Cli,
-        permission_profile: &PermissionProfile::Disabled,
-        windows_sandbox_level: WindowsSandboxLevel::Disabled,
-    });
-    let (single_environment_shell_tools, _) = build_specs(
-        &shell_command_config,
-        /*mcp_tools*/ None,
-        /*deferred_mcp_tools*/ None,
-        &[],
-    );
-    assert_process_tool_environment_id(
-        &single_environment_shell_tools,
-        "shell_command",
-        /*expected_present*/ false,
-    );
-
-    let multi_environment_shell_config =
-        shell_command_config.with_environment_mode(ToolEnvironmentMode::Multiple);
-    let (multi_environment_shell_tools, _) = build_specs(
-        &multi_environment_shell_config,
-        /*mcp_tools*/ None,
-        /*deferred_mcp_tools*/ None,
-        &[],
-    );
-    assert_process_tool_environment_id(
-        &multi_environment_shell_tools,
-        "shell_command",
         /*expected_present*/ true,
     );
 }

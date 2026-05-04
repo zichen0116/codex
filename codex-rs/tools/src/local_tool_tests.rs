@@ -10,7 +10,6 @@ fn windows_shell_guidance_description() -> String {
 fn shell_tool_matches_expected_spec() {
     let tool = create_shell_tool(ShellToolOptions {
         exec_permission_approvals_enabled: false,
-        include_environment_id: false,
     });
 
     let description = if cfg!(windows) {
@@ -97,7 +96,6 @@ fn exec_command_tool_matches_expected_spec() {
     let tool = create_exec_command_tool(CommandToolOptions {
         allow_login_shell: true,
         exec_permission_approvals_enabled: false,
-        include_environment_id: false,
     });
 
     let description = if cfg!(windows) {
@@ -230,7 +228,6 @@ fn write_stdin_tool_matches_expected_spec() {
 fn shell_tool_with_request_permission_includes_additional_permissions() {
     let tool = create_shell_tool(ShellToolOptions {
         exec_permission_approvals_enabled: true,
-        include_environment_id: false,
     });
 
     let mut properties = BTreeMap::from([
@@ -299,40 +296,6 @@ Examples of valid command strings:
 }
 
 #[test]
-fn process_tool_builders_include_environment_id_when_requested() {
-    for tool in [
-        create_shell_tool(ShellToolOptions {
-            exec_permission_approvals_enabled: false,
-            include_environment_id: true,
-        }),
-        create_exec_command_tool(CommandToolOptions {
-            allow_login_shell: true,
-            exec_permission_approvals_enabled: false,
-            include_environment_id: true,
-        }),
-        create_shell_command_tool(CommandToolOptions {
-            allow_login_shell: true,
-            exec_permission_approvals_enabled: false,
-            include_environment_id: true,
-        }),
-    ] {
-        let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = tool else {
-            panic!("expected function tool");
-        };
-        let properties = parameters
-            .properties
-            .expect("function parameters should be an object");
-
-        assert_eq!(
-            properties.get("environment_id"),
-            Some(&JsonSchema::string(Some(
-                "Optional environment id from the <environment_context> block. If omitted, uses the primary environment.".to_string(),
-            )))
-        );
-    }
-}
-
-#[test]
 fn request_permissions_tool_includes_full_permission_schema() {
     let tool =
         create_request_permissions_tool("Request extra permissions for this turn.".to_string());
@@ -369,7 +332,6 @@ fn shell_command_tool_matches_expected_spec() {
     let tool = create_shell_command_tool(CommandToolOptions {
         allow_login_shell: true,
         exec_permission_approvals_enabled: false,
-        include_environment_id: false,
     });
 
     let description = if cfg!(windows) {

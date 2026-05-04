@@ -51,23 +51,6 @@ async fn unified_exec_test(server: &wiremock::MockServer) -> Result<TestCodex> {
     builder.build_remote_aware(server).await
 }
 
-fn tool_names(body: &Value) -> Vec<String> {
-    body.get("tools")
-        .and_then(Value::as_array)
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|tool| {
-                    tool.get("name")
-                        .or_else(|| tool.get("type"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_test_env_can_connect_and_use_filesystem() -> Result<()> {
     let Some(_remote_env) = get_remote_test_env() else {
@@ -201,77 +184,34 @@ async fn exec_command_routing_output(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exec_command_routes_across_empty_single_and_multiple_turn_environments() -> Result<()> {
+async fn exec_command_routes_to_selected_remote_environment() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let Some(_remote_env) = get_remote_test_env() else {
         return Ok(());
     };
 
-    let no_env_server = start_mock_server().await;
-    let no_env_mock = mount_sse_once(
-        &no_env_server,
-        sse(vec![
-            ev_response_created("resp-no-env"),
-            ev_assistant_message("msg-no-env", "done"),
-            ev_completed("resp-no-env"),
-        ]),
-    )
-    .await;
-    unified_exec_test(&no_env_server)
-        .await?
-        .submit_turn_with_environments("route exec command", Some(vec![]))
-        .await?;
-    let no_env_tools = tool_names(&no_env_mock.single_request().body_json());
-    assert!(
-        !no_env_tools.contains(&"exec_command".to_string()),
-        "exec_command should be omitted without turn environments; got {no_env_tools:?}",
-    );
-
-    let single_env_server = start_mock_server().await;
-    let single_env_test = unified_exec_test(&single_env_server).await?;
+    let server = start_mock_server().await;
+    let test = unified_exec_test(&server).await?;
     let local_cwd = TempDir::new()?;
     fs::write(local_cwd.path().join("marker.txt"), "local-routing")?;
     let local_selection = TurnEnvironmentSelection {
         environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: local_cwd.path().abs(),
     };
-    let single_env_output = exec_command_routing_output(
-        &single_env_test,
-        &single_env_server,
-        "call-single-env",
-        json!({
-            "shell": "/bin/sh",
-            "cmd": "cat marker.txt",
-            "login": false,
-            "yield_time_ms": 1_000,
-        }),
-        Some(vec![local_selection.clone()]),
-    )
-    .await?;
-    assert!(
-        single_env_output.contains("local-routing"),
-        "unexpected single-env output: {single_env_output}",
-    );
-    assert!(
-        !single_env_output.contains("remote-routing"),
-        "single-env command should not route to remote: {single_env_output}",
-    );
-
-    let multi_env_server = start_mock_server().await;
-    let multi_env_test = unified_exec_test(&multi_env_server).await?;
-    let local_cwd = TempDir::new()?;
-    fs::write(local_cwd.path().join("marker.txt"), "local-routing")?;
-    let local_selection = TurnEnvironmentSelection {
-        environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
-        cwd: local_cwd.path().abs(),
-    };
-    let remote_cwd = PathBuf::from("/tmp").abs();
-    let remote_marker_name = format!(
-        "codex-remote-routing-{}.txt",
+    let remote_cwd = PathBuf::from(format!(
+        "/tmp/codex-remote-routing-{}",
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
-    );
-    multi_env_test
-        .fs()
+    ))
+    .abs();
+    let remote_marker_name = "marker.txt";
+    test.fs()
+        .create_directory(
+            &remote_cwd,
+            CreateDirectoryOptions { recursive: true },
+            /*sandbox*/ None,
+        )
+        .await?;
+    test.fs()
         .write_file(
             &remote_cwd.join(&remote_marker_name),
             b"remote-routing".to_vec(),
@@ -280,11 +220,11 @@ async fn exec_command_routes_across_empty_single_and_multiple_turn_environments(
         .await?;
     let remote_selection = TurnEnvironmentSelection {
         environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
-        cwd: remote_cwd,
+        cwd: remote_cwd.clone(),
     };
     let multi_env_output = exec_command_routing_output(
-        &multi_env_test,
-        &multi_env_server,
+        &test,
+        &server,
         "call-multi-env",
         json!({
             "shell": "/bin/sh",
@@ -304,6 +244,17 @@ async fn exec_command_routes_across_empty_single_and_multiple_turn_environments(
         !multi_env_output.contains("local-routing"),
         "multi-env command should not route to local: {multi_env_output}",
     );
+
+    test.fs()
+        .remove(
+            &remote_cwd,
+            RemoveOptions {
+                recursive: true,
+                force: true,
+            },
+            /*sandbox*/ None,
+        )
+        .await?;
 
     Ok(())
 }
