@@ -24,6 +24,7 @@ use crate::tools::handlers::implicit_granted_permissions;
 use crate::tools::handlers::normalize_and_validate_additional_permissions;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
+use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::handlers::resolve_workdir_base_path;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::orchestrator::ToolOrchestrator;
@@ -36,6 +37,7 @@ use crate::tools::runtimes::shell::ShellRuntime;
 use crate::tools::runtimes::shell::ShellRuntimeBackend;
 use crate::tools::sandboxing::ToolCtx;
 use codex_features::Feature;
+use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_shell_command::is_safe_command::is_known_safe_command;
@@ -79,6 +81,8 @@ struct RunExecLikeArgs {
     tool_name: String,
     exec_params: ExecParams,
     hook_command: String,
+    target_environment: Arc<codex_exec_server::Environment>,
+    exec_server_env_config: Option<crate::sandboxing::ExecServerEnvConfig>,
     additional_permissions: Option<AdditionalPermissionProfile>,
     prefix_rule: Option<Vec<String>>,
     session: Arc<crate::session::session::Session>,
@@ -144,6 +148,7 @@ impl ShellCommandHandler {
         session: &crate::session::session::Session,
         turn_context: &TurnContext,
         thread_id: ThreadId,
+        cwd: codex_utils_absolute_path::AbsolutePathBuf,
         allow_login_shell: bool,
     ) -> Result<ExecParams, FunctionCallError> {
         let shell = session.user_shell();
@@ -152,7 +157,7 @@ impl ShellCommandHandler {
 
         Ok(ExecParams {
             command,
-            cwd: turn_context.resolve_path(params.workdir.clone()),
+            cwd,
             expiration: params.timeout_ms.into(),
             capture_policy: ExecCapturePolicy::ShellTool,
             env: create_env(&turn_context.shell_environment_policy, Some(thread_id)),
@@ -166,6 +171,36 @@ impl ShellCommandHandler {
             justification: params.justification.clone(),
             arg0: None,
         })
+    }
+}
+
+fn exec_server_env_policy_from_shell_policy(
+    policy: &ShellEnvironmentPolicy,
+) -> codex_exec_server::ExecEnvPolicy {
+    codex_exec_server::ExecEnvPolicy {
+        inherit: policy.inherit.clone(),
+        ignore_default_excludes: policy.ignore_default_excludes,
+        exclude: policy
+            .exclude
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+        r#set: policy.r#set.clone(),
+        include_only: policy
+            .include_only
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+    }
+}
+
+fn exec_server_env_config(
+    policy: &ShellEnvironmentPolicy,
+    local_policy_env: &std::collections::HashMap<String, String>,
+) -> crate::sandboxing::ExecServerEnvConfig {
+    crate::sandboxing::ExecServerEnvConfig {
+        policy: exec_server_env_policy_from_shell_policy(policy),
+        local_policy_env: local_policy_env.clone(),
     }
 }
 
@@ -250,6 +285,16 @@ impl ToolHandler for ShellHandler {
                     tool_name: tool_name.display(),
                     exec_params,
                     hook_command: codex_shell_command::parse_command::shlex_join(&params.command),
+                    target_environment: turn
+                        .environments
+                        .primary()
+                        .map(|environment| Arc::clone(&environment.environment))
+                        .ok_or_else(|| {
+                            FunctionCallError::RespondToModel(
+                                "shell is unavailable in this session".to_string(),
+                            )
+                        })?,
+                    exec_server_env_config: None,
                     additional_permissions: params.additional_permissions.clone(),
                     prefix_rule,
                     session,
@@ -268,6 +313,16 @@ impl ToolHandler for ShellHandler {
                     tool_name: tool_name.display(),
                     exec_params,
                     hook_command: codex_shell_command::parse_command::shlex_join(&params.command),
+                    target_environment: turn
+                        .environments
+                        .primary()
+                        .map(|environment| Arc::clone(&environment.environment))
+                        .ok_or_else(|| {
+                            FunctionCallError::RespondToModel(
+                                "shell is unavailable in this session".to_string(),
+                            )
+                        })?,
+                    exec_server_env_config: None,
                     additional_permissions: None,
                     prefix_rule: None,
                     session,
@@ -360,14 +415,18 @@ impl ToolHandler for ShellCommandHandler {
             )));
         };
 
-        let cwd = resolve_workdir_base_path(&arguments, &turn.cwd)?;
-        let params: ShellCommandToolCallParams = parse_arguments_with_base_path(&arguments, &cwd)?;
-        let workdir = turn.resolve_path(params.workdir.clone());
+        let Some(target_environment) = resolve_tool_environment(turn.as_ref(), &arguments)? else {
+            return Err(FunctionCallError::RespondToModel(
+                "shell is unavailable in this session".to_string(),
+            ));
+        };
+        let params: ShellCommandToolCallParams =
+            parse_arguments_with_base_path(&arguments, &target_environment.cwd)?;
         maybe_emit_implicit_skill_invocation(
             session.as_ref(),
             turn.as_ref(),
             &params.command,
-            &workdir,
+            &target_environment.cwd,
         )
         .await;
         let prefix_rule = params.prefix_rule.clone();
@@ -376,12 +435,19 @@ impl ToolHandler for ShellCommandHandler {
             session.as_ref(),
             turn.as_ref(),
             session.conversation_id,
+            target_environment.cwd.clone(),
             turn.tools_config.allow_login_shell,
         )?;
+        let exec_server_env_config = target_environment
+            .environment
+            .is_remote()
+            .then(|| exec_server_env_config(&turn.shell_environment_policy, &exec_params.env));
         ShellHandler::run_exec_like(RunExecLikeArgs {
             tool_name: tool_name.display(),
             exec_params,
             hook_command: params.command,
+            target_environment: target_environment.environment,
+            exec_server_env_config,
             additional_permissions: params.additional_permissions.clone(),
             prefix_rule,
             session,
@@ -401,6 +467,8 @@ impl ShellHandler {
             tool_name,
             exec_params,
             hook_command,
+            target_environment,
+            exec_server_env_config,
             additional_permissions,
             prefix_rule,
             session,
@@ -412,12 +480,7 @@ impl ShellHandler {
         } = args;
 
         let mut exec_params = exec_params;
-        let Some(turn_environment) = turn.environments.primary() else {
-            return Err(FunctionCallError::RespondToModel(
-                "shell is unavailable in this session".to_string(),
-            ));
-        };
-        let fs = turn_environment.environment.get_filesystem();
+        let fs = target_environment.get_filesystem();
 
         let dependency_env = session.dependency_env().await;
         if !dependency_env.is_empty() {
@@ -436,7 +499,7 @@ impl ShellHandler {
         let requested_additional_permissions = additional_permissions.clone();
         let effective_additional_permissions = apply_granted_turn_permissions(
             session.as_ref(),
-            turn.cwd.as_path(),
+            exec_params.cwd.as_path(),
             exec_params.sandbox_permissions,
             additional_permissions,
         )
@@ -522,7 +585,7 @@ impl ShellHandler {
                 approval_policy: turn.approval_policy.value(),
                 permission_profile: turn.permission_profile(),
                 file_system_sandbox_policy: &file_system_sandbox_policy,
-                sandbox_cwd: turn.cwd.as_path(),
+                sandbox_cwd: exec_params.cwd.as_path(),
                 sandbox_permissions: if effective_additional_permissions.permissions_preapproved {
                     codex_protocol::models::SandboxPermissions::UseDefault
                 } else {
@@ -536,8 +599,10 @@ impl ShellHandler {
             command: exec_params.command.clone(),
             hook_command,
             cwd: exec_params.cwd.clone(),
+            environment: target_environment,
             timeout_ms: exec_params.expiration.timeout_ms(),
             env: exec_params.env.clone(),
+            exec_server_env_config,
             explicit_env_overrides,
             network: exec_params.network.clone(),
             sandbox_permissions: effective_additional_permissions.sandbox_permissions,

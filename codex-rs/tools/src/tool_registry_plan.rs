@@ -181,6 +181,7 @@ pub fn build_tool_registry_plan(
                     create_shell_command_tool(CommandToolOptions {
                         allow_login_shell: config.allow_login_shell,
                         exec_permission_approvals_enabled,
+                        include_environment_id,
                     }),
                     /*supports_parallel_tool_calls*/ true,
                     config.code_mode_enabled,

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 pub struct CommandToolOptions {
     pub allow_login_shell: bool,
     pub exec_permission_approvals_enabled: bool,
+    pub include_environment_id: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +235,7 @@ pub fn create_shell_command_tool(options: CommandToolOptions) -> ToolSpec {
             )),
         );
     }
+    maybe_insert_environment_id_parameter(&mut properties, options.include_environment_id);
     properties.extend(create_approval_parameters(
         options.exec_permission_approvals_enabled,
     ));

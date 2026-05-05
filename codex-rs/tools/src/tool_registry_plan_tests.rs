@@ -237,7 +237,7 @@ fn exec_command_spec_includes_environment_id_only_for_multiple_selected_environm
     assert_process_tool_environment_id(
         &multi_environment_shell_tools,
         "shell_command",
-        /*expected_present*/ false,
+        /*expected_present*/ true,
     );
 }
 
