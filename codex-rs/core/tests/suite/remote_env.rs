@@ -51,6 +51,15 @@ async fn unified_exec_test(server: &wiremock::MockServer) -> Result<TestCodex> {
     builder.build_remote_aware(server).await
 }
 
+async fn list_dir_test(server: &wiremock::MockServer) -> Result<TestCodex> {
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .experimental_supported_tools
+            .push("list_dir".to_string());
+    });
+    builder.build_remote_aware(server).await
+}
+
 fn tool_names(body: &Value) -> Vec<String> {
     body.get("tools")
         .and_then(Value::as_array)
@@ -200,6 +209,38 @@ async fn exec_command_routing_output(
         .with_context(|| format!("missing function_call_output for {call_id}"))
 }
 
+async fn list_dir_routing_output(
+    test: &TestCodex,
+    server: &wiremock::MockServer,
+    call_id: &str,
+    arguments: Value,
+    environments: Option<Vec<TurnEnvironmentSelection>>,
+) -> Result<String> {
+    let response_mock = mount_sse_sequence(
+        server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "list_dir", &serde_json::to_string(&arguments)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    test.submit_turn_with_environments("route list dir", environments)
+        .await?;
+
+    response_mock
+        .function_call_output_text(call_id)
+        .with_context(|| format!("missing function_call_output for {call_id}"))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exec_command_routes_across_empty_single_and_multiple_turn_environments() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -303,6 +344,107 @@ async fn exec_command_routes_across_empty_single_and_multiple_turn_environments(
     assert!(
         !multi_env_output.contains("local-routing"),
         "multi-env command should not route to local: {multi_env_output}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_dir_routes_across_empty_single_and_multiple_turn_environments() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let Some(_remote_env) = get_remote_test_env() else {
+        return Ok(());
+    };
+
+    let no_env_server = start_mock_server().await;
+    let no_env_mock = mount_sse_once(
+        &no_env_server,
+        sse(vec![
+            ev_response_created("resp-no-env"),
+            ev_assistant_message("msg-no-env", "done"),
+            ev_completed("resp-no-env"),
+        ]),
+    )
+    .await;
+    list_dir_test(&no_env_server)
+        .await?
+        .submit_turn_with_environments("route list dir", Some(vec![]))
+        .await?;
+    let no_env_tools = tool_names(&no_env_mock.single_request().body_json());
+    assert!(
+        !no_env_tools.contains(&"list_dir".to_string()),
+        "list_dir should be omitted without turn environments; got {no_env_tools:?}",
+    );
+
+    let single_env_server = start_mock_server().await;
+    let single_env_test = list_dir_test(&single_env_server).await?;
+    let local_cwd = TempDir::new()?;
+    fs::write(local_cwd.path().join("marker-local.txt"), "local-routing")?;
+    let local_cwd_abs = local_cwd.path().abs();
+    let local_selection = TurnEnvironmentSelection {
+        environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+        cwd: local_cwd_abs.clone(),
+    };
+    let single_env_output = list_dir_routing_output(
+        &single_env_test,
+        &single_env_server,
+        "call-list-dir-single-env",
+        json!({
+            "dir_path": local_cwd_abs.to_string_lossy(),
+            "depth": 1,
+        }),
+        Some(vec![local_selection.clone()]),
+    )
+    .await?;
+    assert!(
+        single_env_output.contains("marker-local.txt"),
+        "unexpected single-env list_dir output: {single_env_output}",
+    );
+    assert!(
+        !single_env_output.contains("marker-remote.txt"),
+        "single-env list_dir should not route to remote: {single_env_output}",
+    );
+
+    let multi_env_server = start_mock_server().await;
+    let multi_env_test = list_dir_test(&multi_env_server).await?;
+    let local_cwd = TempDir::new()?;
+    fs::write(local_cwd.path().join("marker-local.txt"), "local-routing")?;
+    let local_selection = TurnEnvironmentSelection {
+        environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+        cwd: local_cwd.path().abs(),
+    };
+    let remote_cwd = multi_env_test.config.cwd.clone();
+    multi_env_test
+        .fs()
+        .write_file(
+            &remote_cwd.join("marker-remote.txt"),
+            b"remote-routing".to_vec(),
+            /*sandbox*/ None,
+        )
+        .await?;
+    let remote_selection = TurnEnvironmentSelection {
+        environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+        cwd: remote_cwd.clone(),
+    };
+    let multi_env_output = list_dir_routing_output(
+        &multi_env_test,
+        &multi_env_server,
+        "call-list-dir-multi-env",
+        json!({
+            "dir_path": remote_cwd.to_string_lossy(),
+            "depth": 1,
+            "environment_id": REMOTE_ENVIRONMENT_ID,
+        }),
+        Some(vec![local_selection, remote_selection]),
+    )
+    .await?;
+    assert!(
+        multi_env_output.contains("marker-remote.txt"),
+        "unexpected multi-env list_dir output: {multi_env_output}",
+    );
+    assert!(
+        !multi_env_output.contains("marker-local.txt"),
+        "multi-env list_dir should not route to local: {multi_env_output}",
     );
 
     Ok(())
