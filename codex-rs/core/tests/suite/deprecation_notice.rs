@@ -141,7 +141,7 @@ async fn emits_deprecation_notice_for_notify() -> anyhow::Result<()> {
     assert_eq!(
         details.as_deref(),
         Some(
-            "Switch to a `Stop` hook for end-of-turn automation. See https://developers.openai.com/codex/hooks."
+            "Switch to a `Stop` hook for end-of-turn automation. See https://developers.openai.com/codex/hooks"
         ),
     );
     Ok(())
