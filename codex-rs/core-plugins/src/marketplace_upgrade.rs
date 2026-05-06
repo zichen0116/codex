@@ -6,6 +6,9 @@ use self::activation::installed_marketplace_metadata_matches;
 use self::activation::write_installed_marketplace_metadata;
 use self::git::clone_git_source;
 use self::git::git_remote_revision;
+use crate::installed_marketplaces::MARKETPLACE_STALE_TEMP_DIR_MAX_AGE;
+use crate::installed_marketplaces::marketplace_install_root;
+use crate::installed_marketplaces::remove_stale_marketplace_temp_dirs;
 use crate::marketplace::validate_marketplace_root;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerStack;
@@ -17,11 +20,9 @@ use codex_plugin::validate_plugin_segment;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashMap;
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::Duration;
 use tracing::warn;
 
-const INSTALLED_MARKETPLACES_DIR: &str = ".tmp/marketplaces";
 const MARKETPLACE_UPGRADE_GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,10 +100,6 @@ pub fn upgrade_configured_git_marketplaces(
         upgraded_roots,
         errors,
     }
-}
-
-fn marketplace_install_root(codex_home: &Path) -> PathBuf {
-    codex_home.join(INSTALLED_MARKETPLACES_DIR)
 }
 
 fn configured_git_marketplaces(
@@ -192,6 +189,7 @@ fn upgrade_configured_git_marketplace(
             staging_parent.display()
         )
     })?;
+    remove_stale_marketplace_temp_dirs(install_root, MARKETPLACE_STALE_TEMP_DIR_MAX_AGE);
     let staged_dir = tempfile::Builder::new()
         .prefix("marketplace-upgrade-")
         .tempdir_in(&staging_parent)

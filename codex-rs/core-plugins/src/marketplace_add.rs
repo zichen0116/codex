@@ -1,5 +1,7 @@
 use crate::OPENAI_CURATED_MARKETPLACE_NAME;
+use crate::installed_marketplaces::MARKETPLACE_STALE_TEMP_DIR_MAX_AGE;
 use crate::installed_marketplaces::marketplace_install_root;
+use crate::installed_marketplaces::remove_stale_marketplace_temp_dirs;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::fs;
 use std::path::Path;
@@ -151,6 +153,7 @@ where
             staging_root.display()
         ))
     })?;
+    remove_stale_marketplace_temp_dirs(&install_root, MARKETPLACE_STALE_TEMP_DIR_MAX_AGE);
     let staged_root = Builder::new()
         .prefix("marketplace-add-")
         .tempdir_in(&staging_root)
@@ -214,7 +217,46 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use pretty_assertions::assert_eq;
+    #[cfg(not(windows))]
+    use std::fs::File;
+    #[cfg(not(windows))]
+    use std::fs::FileTimes;
+    use std::process::Command;
+    use std::time::Duration;
+    use std::time::SystemTime;
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    fn set_dir_mtime(path: &Path, age: Duration) -> Result<()> {
+        let modified_at = SystemTime::now()
+            .checked_sub(age)
+            .ok_or_else(|| anyhow::anyhow!("failed to compute stale directory time"))?;
+        let modified_at = chrono::DateTime::<chrono::Utc>::from(modified_at).to_rfc3339();
+        let escaped_path = path.to_string_lossy().replace('\'', "''");
+        let command = format!(
+            "(Get-Item -LiteralPath '{escaped_path}').LastWriteTimeUtc = [DateTime]::Parse('{modified_at}')"
+        );
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", &command])
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "failed to set directory time: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    fn set_dir_mtime(path: &Path, age: Duration) -> Result<()> {
+        let modified_at = SystemTime::now()
+            .checked_sub(age)
+            .ok_or_else(|| anyhow::anyhow!("failed to compute stale directory time"))?;
+        let times = FileTimes::new().set_modified(modified_at);
+        File::options().read(true).open(path)?.set_times(times)?;
+        Ok(())
+    }
 
     #[test]
     fn add_marketplace_sync_installs_marketplace_and_updates_config() -> Result<()> {
@@ -356,6 +398,50 @@ mod tests {
         assert!(second_result.already_added);
         assert_eq!(second_result.installed_root, first_result.installed_root);
 
+        Ok(())
+    }
+
+    #[test]
+    fn add_marketplace_sync_removes_stale_marketplace_temp_dirs_before_staging() -> Result<()> {
+        let codex_home = TempDir::new()?;
+        let source_root = TempDir::new()?;
+        write_marketplace_source(source_root.path(), "remote copy")?;
+
+        let install_root = marketplace_install_root(codex_home.path());
+        let staging_root = marketplace_staging_root(&install_root);
+        let stale_upgrade_dir = staging_root.join("marketplace-upgrade-stale");
+        let stale_add_dir = staging_root.join("marketplace-add-stale");
+        let stale_backup_dir = install_root.join("marketplace-backup-stale");
+        let unrelated_dir = staging_root.join("other-dir");
+        std::fs::create_dir_all(&stale_upgrade_dir)?;
+        std::fs::create_dir_all(&stale_add_dir)?;
+        std::fs::create_dir_all(&stale_backup_dir)?;
+        std::fs::create_dir_all(&unrelated_dir)?;
+
+        let stale_age = MARKETPLACE_STALE_TEMP_DIR_MAX_AGE + Duration::from_secs(60);
+        set_dir_mtime(&stale_upgrade_dir, stale_age)?;
+        set_dir_mtime(&stale_add_dir, stale_age)?;
+        set_dir_mtime(&stale_backup_dir, stale_age)?;
+        set_dir_mtime(&unrelated_dir, stale_age)?;
+
+        let result = add_marketplace_sync_with_cloner(
+            codex_home.path(),
+            MarketplaceAddRequest {
+                source: "https://github.com/owner/repo.git".to_string(),
+                ref_name: None,
+                sparse_paths: Vec::new(),
+            },
+            |_url, _ref_name, _sparse_paths, destination| {
+                copy_dir_all(source_root.path(), destination)
+                    .map_err(|err| MarketplaceAddError::Internal(err.to_string()))
+            },
+        )?;
+
+        assert_eq!(result.marketplace_name, "debug");
+        assert!(!stale_upgrade_dir.exists());
+        assert!(!stale_add_dir.exists());
+        assert!(!stale_backup_dir.exists());
+        assert!(unrelated_dir.is_dir());
         Ok(())
     }
 
